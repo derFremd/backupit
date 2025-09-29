@@ -1,0 +1,341 @@
+#!/bin/sh
+
+#
+# Incremental backup script of user folder
+# Version: 0.2
+# Last modification: 26.04.2024
+# Author: der.fremd@gmail.com
+#
+
+#--------------------------
+# Begin of the script setup
+#--------------------------
+
+# Where the backup storage is located. The directory must be specified and exist.
+BACKUP_TO=
+
+# The name of the file with the backup exclude list.
+EXCLUDE_FILE=".exclude_backup"
+
+# Exclude pattern.
+EXCLUDE=
+
+# Maximum number of incremental files.
+# The index of files is zero based.
+# If exceeded, the old backup files will be deleted
+# and a new full backup with index zero will be created.
+# If MAX_FILES=1 then make only full backup with zero index.
+# By default MAX_FILES=9
+MAX_FILES=
+
+# The email address where to send the error message.
+# If not specified, the email will not be sent.
+EMAIL=
+
+# The name of the backup log file.
+# If not specified, logs are output to the console.
+#LOG_FILE="backup.log"
+LOG_FILE=
+
+# If defined then detailed information
+# about the script actions will not be shown.
+SILENCE=
+
+# The username whose the own home directory should be beackuped.
+# Do not use together with BACKUP_FROM.
+USER_NAME=
+
+# Directory wich should be backuped.
+# Do not use together with USER_NAME.
+BACKUP_FROM=
+
+#---------------------------------------------
+# End of the script setup
+#---------------------------------------------
+# Below is the main script code.
+# To configure the parameters of this script,
+# use only the code with the variables above.
+#---------------------------------------------
+
+VERSION="0.2"
+
+# print the log messages
+function printlog() {
+    if [ -z "$SILENCE" ] ; then
+        if [ -n "$LOG_FILE" ] ; then
+	    MSG=`date "+%Y-%m-%d %H:%M:%S"`" - $1"
+	    if [ -d "$BACKUP_TO" ] ; then
+		echo "$MSG" >> "$BACKUP_TO/$LOG_FILE"
+    	    else
+    		echo "$MSG" >> "./$LOG_FILE"
+    	    fi
+    	else
+    	    if [[ "$1" =~ ^[Ee]rror\:\ .*$ ]] ; then
+    		echo "$1" >&2
+    	    else
+    		echo "$1"
+    	    fi
+	fi
+	
+    fi
+}
+
+# print the error messages and send e-mai messages whe e-mail is configured
+function errorlog() {
+    STR="Error: $1"
+    printlog "$STR"
+    if [[ -n "$EMAIL" && -n "$LOG_FILE" ]] ; then
+	echo -e "$STR\n\nScript name: '$0'.\nDetails in the logfile: '$LOG_FILE'" | \
+	    mail -s "Server backup error" "$EMAIL";
+    fi
+}
+
+# print help message
+function usage() {
+    cat <<HELP
+Usage: $0 [OPTIONS...]
+This is incremental backup script of the user home folder.
+
+Options:
+    -d [dir], --dir=[dir]			Sets the directory backup mode where [dir] is the folder
+						which will be backuped.
+						Cannot be used together with options '-u' and '--user' because
+						the user home directory determinate automatic.
+
+    -u [username], --user=[username]		Sets the user backup mode where [username] is the username
+						whose the own home directory should be backuped.
+						Cannot be used together with the options'-d' and '--dir' because
+						the user home directory determinate automatic.
+
+    -m [number] , --max-files=[number]		Sets maximum number of incremental archive files.
+						Index of files is zero based. Default value is 9.
+						If [number] = 1 then script makes only full backup with zero index.
+
+    -l [logfile], --log-file=[logfile]		Sets name of logfile. If is not specified
+						that all outputs to standart pipe.
+
+    -b [dir], --backup-to=[dir]			Sets directory to storage incrimental backup files.
+
+    -X [filename], --exclude-from=[filename]	Sets filename which contain of excludes list.
+						By default is '.exclude_backup'.
+						This file should be palaced at folder for backup.
+						See utility 'tar' option: '--exclude-from'.
+
+    -x [pattern], --exclude=[pattern]		Sets exclude pattern. See utility 'tar' option: '--exclude'.
+
+    -e [e-mail], --email=[email]		E-meil where error messages will be send.
+						By default this option is disabled.
+
+    -s, --silence				Do not show detailed information.
+
+    -v, --version				Print version of this script.
+
+    -h, -?, --help				Give this help.
+HELP
+}
+
+# Parsing params
+skippar=false
+for op in "$@";
+do
+    if $skippar; then skippar=false; continue; fi
+
+    case "$op" in
+	-h|-\?|--help) usage; exit 0;;
+	
+	-v|--version) echo "$VERSION"; exit 0;;
+
+	--user=*) USER_NAME="${1#*=}"; shift 1;;
+	-u|--user) USER_NAME="$2"; skippar=true; shift 2;;
+
+	--max-files=*) MAX_FILES="${1#*=}"; shift 1;;
+	-m|--max-files) MAX_FILES="$2"; skippar=true; shift 2;;
+
+	--backup-to=*) BACKUP_TO="${1#*=}"; shift 1;;
+	-b|--backup-to) BACKUP_TO="$2"; skippar=true; shift 2;;
+
+	--dir=*) BACKUP_FROM="${1#*=}"; shift 1;;
+	-d|--dir) BACKUP_FROM="$2"; skippar=true; shift 2;;
+
+	--log-file=*) LOG_FILE="${1#*=}"; shift 1;;
+	-l|--log-file) LOG_FILE="$2"; skippar=true; shift 2;;
+	
+	--email=*) EMAIL="${1#*=}"; shift 1;;
+	-e|--email) EMAIL="$2"; skippar=true; shift 2;;
+
+	-s|--silence) SILENCE=1; shift;;
+
+	--) break;;
+
+	-*) echo "Error: unknown option $1"; exit 1;;
+    esac
+done
+
+# check backup directory
+
+# remove all trailing characters '/' from BACKUP_TO
+while [[ "$BACKUP_TO" =~ ^.*\/$ && "${#BACKUP_TO}" -gt 1 ]] ; do
+    BACKUP_TO=${BACKUP_TO%\/}
+done
+
+# prepare logfile name
+LOG_FILE=${LOG_FILE##*/}
+
+TAR_PATH=`which tar 2>/dev/null`
+if [ -z "$TAR_PATH" ] ; then
+    errorlog "The TAR utility was not found"
+    exit 1
+fi
+
+printlog "User backup script started"
+
+# backup directory have to be exist
+if [ -z "$BACKUP_TO" ] ; then
+    errorlog "The backup directiry is not defined. See 'BACKUP_TO' script variable or '--backup-to' option."
+    exit 1
+elif [ ! -d "$BACKUP_TO" ] ; then
+    errorlog "The backup directory '$BACKUP_TO' is not exists."
+    exit 1
+else
+    printlog "Backup directory is '$BACKUP_TO'"
+fi
+
+# number of incremetal archive files
+
+if [ -z "$MAX_FILES" ] ; then
+    MAX_FILES=9 # by default
+elif [[ ! "$MAX_FILES" =~ ^[1-9][0-9]*$ ]] ; then # only number
+    errorlog "Script options '-m [n], --max-files [number]' or script var 'MAX_FILES' should be a number and non zero."
+    exit 1
+fi
+printlog "Maximum number of incremental archive files is $MAX_FILES"
+
+# user mode or directory mode?
+if [[ -n "$BACKUP_FROM" && -n "$USER_NAME" ]] ; then
+
+    errorlog "Оptions '-u|--user' and '-d|--dir' cannot be specified together."
+    exit 1
+
+elif [[ -z "$BACKUP_FROM" && -z "$USER_NAME" ]] ; then
+
+    printlog "One of the options '-u|--user' or '-d|--dir' have to be specified."
+    exit 1
+
+elif [ -n "$USER_NAME" ] ; then # determine backuping folder by user home folder
+
+    printlog "Switch to user backup mode"
+
+    # checking if user exist
+    if ! id "$USER_NAME" >/dev/null 2>&1; then
+	errorlog "User '$USER_NAME' is not found."
+        exit 1
+    else
+        printlog "User name is '$USER_NAME'"
+    fi
+
+    # the path to user folder
+    if [ "$USER_NAME" = "root" ] ; then
+	BACKUP_FROM="/root"
+    else
+	BACKUP_FROM=$(sudo -u "$USER_NAME" sh -c 'echo $HOME')
+    fi
+else
+    printlog "Switch to directory backup mode"
+fi
+
+# checking if source directory
+if [ ! -d "$BACKUP_FROM" ] ; then
+    errorlog "The source backup directory '$BACKUP_FROM' is not exist"
+    exit 1
+fi
+
+# make backup destination sub-folder
+
+if [ -n "$USER_NAME" ] ; then
+    BACKUP_TO_SUB="$BACKUP_TO/backup-users/$USER_NAME"
+else
+    SUB_FLD="$BACKUP_FROM"
+
+    while [[ "$SUB_FLD" =~ ^/.*$ ]]; do SUB_FLD=${SUB_FLD#/}; done;
+    BACKUP_TO_SUB="$BACKUP_TO/backup-folders/${SUB_FLD////-}"
+fi
+
+mkdir -p "$BACKUP_TO_SUB" #2>/dev/null
+
+if [ ! -d "$BACKUP_TO_SUB" ] ; then
+    errorlog "Unable to make folder to backup data'$BACKUP_TO_SUB'"
+    exit 1
+else
+    printlog "Backup to subfolder '$BACKUP_TO_SUB'"
+fi
+
+# checking for the excluding file in the folder of current user
+EXCLUDE_FILE="$BACKUP_FROM/$EXCLUDE_FILE"
+
+if [ -f "$EXCLUDE_FILE" ] ; then
+    EXCLUDE_FROM_OPT="--exclude-from=$EXCLUDE_FILE"
+    printlog "Specified exclude file found at '$EXCLUDE_FILE'"
+else
+    EXCLUDE_FROM_OPT=""
+    printlog "Specified exclude file '$EXCLUDE_FILE' is not found"
+fi
+
+# exclude pattern
+if [ -n "$EXCLUDE" ] ; then
+    EXCLUDE_OPT="--exclude=$EXCLUDE"
+    printlog "Exclude pattern is '$EXCLUDE'"
+else
+    EXCLUDE_OPT=
+    printlog "Exclude pattern is not defined"
+fi
+
+# the base name of the backup file without a number and extension
+if [ -n "$USER_NAME" ] ; then
+    BASE_BK_FILE="$BACKUP_TO_SUB/backup-user-$USER_NAME"
+else
+    BASE_BK_FILE="$BACKUP_TO_SUB/backup-folder-${BACKUP_FROM##*/}"
+fi
+
+# looking for existing backups
+for (( N_FILE=0; N_FILE <= $MAX_FILES; N_FILE++ ))
+do
+    # if files equal to MAX_FILES or more, then a full backup
+    if [ $N_FILE -eq $MAX_FILES ] ; then 
+	N_FILE=0 # reset to zero index
+	rm "$BASE_BK_FILE"-*.tgz # removes all old backup files
+	rm "$BASE_BK_FILE".snar # and incremental index file
+    fi
+
+    FULL_BK_NAME="$BASE_BK_FILE-$N_FILE.tgz" # the name of current backup file
+
+    # unoccupied backup file name was found
+    if [ ! -f "$FULL_BK_NAME" ] ; then
+	break;
+    fi
+done
+
+printlog "Starts incremental backup file '$FULL_BK_NAME'"
+
+LAST_PWD=`pwd`
+cd "$BACKUP_FROM"
+
+# create of the archive file
+$TAR_PATH --create \
+    "$EXCLUDE_FROM_OPT" \
+    --gzip \
+    --file="$FULL_BK_NAME" \
+    --ignore-failed-read \
+    --listed-incremental="${BASE_BK_FILE}.snar" \
+    "$BACKUP_FROM" 2>/dev/null
+ERROR_CODE=$?
+
+cd "$LAST_PWD"
+
+RESULT_MSG="Finish of incremental backup file '$FULL_BK_NAME'"
+if [ ! "$ERROR_CODE" -eq 0 ] ; then
+    errorlog "$RESULT_MSG with an error code $ERROR_CODE of the 'tar' utility"
+else
+    printlog "$RESULT_MSG successfully"
+fi
+
+printlog "User backup script finished"
